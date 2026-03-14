@@ -1,24 +1,20 @@
-# Use a modern, supported lightweight Python base image
-FROM runpod/pytorch:2.4.0-py3.11-cuda12.4.1-devel-ubuntu22.04
+# 1. Use the official, completely pristine PyTorch image directly from the source
+FROM pytorch/pytorch:2.4.0-cuda12.1-cudnn9-runtime
 
 WORKDIR /app
 
-# Install modernized system dependencies for image processing
+# 2. Install our required system graphics libraries
 RUN apt-get update && apt-get install -y \
     libgl1 \
     libglib2.0-0 \
     && rm -rf /var/lib/apt/lists/*
 
-# --- THE FIX ---
-# Purge the broken pre-installed RunPod libraries that are crashing PyTorch
-RUN pip uninstall -y xformers flash-attn
-
-# Copy and install Python dependencies
+# 3. Install our clean Python requirements
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
-# Copy your serverless handler code
+# 4. Copy the RunPod Serverless handler
 COPY handler.py .
 
-# Start the worker
+# 5. Keep the unbuffered diagnostic flag to stream logs instantly
 CMD ["python", "-u", "handler.py"]
