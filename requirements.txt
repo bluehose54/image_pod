@@ -1,0 +1,7 @@
+runpod
+diffusers[torch]
+transformers
+accelerate
+torch
+torchvision
+torchaudio
