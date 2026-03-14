@@ -8,61 +8,56 @@ import random
 import traceback
 import os
 
-# --- 1. NETWORK VOLUME & AUTH SETUP ---
+# --- 1. SYSTEM SETUP ---
 VOLUME_PATH = "/runpod-volume/huggingface-cache"
 os.makedirs(VOLUME_PATH, exist_ok=True)
 
-# FLUX is a gated model. This pulls the token from your RunPod Environment Variables.
 HF_TOKEN = os.environ.get("HF_TOKEN")
-
-# Performance Upgrade for modern GPUs
 torch.backends.cuda.matmul.allow_tf32 = True
 
-print("Checking Network Volume for FLUX.1 [dev] model. This may take 5-10 minutes on the first run...")
+# We create an empty global variable for the model, but WE DO NOT LOAD IT YET.
+pipe = None
 
-try:
-    # --- 2. LOAD FLUX PIPELINE ---
-    # Notice we are using FluxPipeline and bfloat16 (which FLUX requires)
-    pipe = FluxPipeline.from_pretrained(
-        "black-forest-labs/FLUX.1-dev",
-        torch_dtype=torch.bfloat16,
-        cache_dir=VOLUME_PATH,
-        token=HF_TOKEN
-    )
-    
-    # CRITICAL: This prevents 24GB GPUs from crashing by offloading idle parts of the 23GB model to system RAM
-    pipe.enable_model_cpu_offload()
-    print("FLUX loaded successfully!")
-    
-except Exception as e:
-    print(f"❌ Failed to load FLUX: {e}")
-    print("Did you forget to add your HF_TOKEN to the RunPod Endpoint Environment Variables?")
-    raise e
+def load_model():
+    """Lazy loads the model only when the first job arrives."""
+    global pipe
+    if pipe is None:
+        print("Checking Network Volume for FLUX.1 [dev] model...")
+        print("If this is the first run, it will download 23GB. Do not close your terminal...")
+        
+        try:
+            pipe = FluxPipeline.from_pretrained(
+                "black-forest-labs/FLUX.1-dev",
+                torch_dtype=torch.bfloat16,
+                cache_dir=VOLUME_PATH,
+                token=HF_TOKEN
+            )
+            pipe.enable_model_cpu_offload()
+            print("FLUX loaded successfully into VRAM!")
+        except Exception as e:
+            print(f"❌ Failed to load FLUX: {e}")
+            raise e
 
 def handler(job):
     try:
+        # --- 2. THE TRIGGER ---
+        # Before processing the prompt, check if the model is downloaded/loaded.
+        load_model()
+        
         job_input = job.get('input', {})
         
-        # --- INPUT EXTRACTION ---
         prompt = job_input.get('prompt', 'A sweeping, hyper-realistic aerial photograph of ancient Jerusalem.')
-        
         width = int(job_input.get('width', 1344))
         height = int(job_input.get('height', 768))
-        
-        # FLUX requires fewer steps for mastery. 28-30 is the sweet spot.
         steps = int(job_input.get('steps', 28))
-        
-        # FLUX guidance scale is much lower than SDXL. 3.5 is standard.
         cfg_scale = float(job_input.get('guidance_scale', 3.5))
         
         print(f"Generating FLUX image ({width}x{height}) for prompt: {prompt}")
         
         seed = job_input.get('seed', random.randint(0, 1000000))
-        # CPU generator is safer when using cpu_offload
         generator = torch.Generator(device="cpu").manual_seed(seed) 
         
-        # --- GENERATION ---
-        # Note: No negative_prompt! FLUX doesn't need it.
+        # --- 3. GENERATION ---
         image = pipe(
             prompt=prompt,
             width=width,
@@ -72,7 +67,6 @@ def handler(job):
             generator=generator
         ).images[0]
 
-        # --- ENCODING ---
         buffered = BytesIO()
         image.save(buffered, format="PNG") 
         img_str = base64.b64encode(buffered.getvalue()).decode("utf-8")
@@ -96,6 +90,7 @@ def handler(job):
     finally:
         clean()
 
-# Start the Serverless worker
+# --- 4. INSTANT START ---
+# The worker will immediately reach this line on boot and pass RunPod's health checks!
 if __name__ == "__main__":
     runpod.serverless.start({"handler": handler})
