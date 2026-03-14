@@ -1,7 +1,6 @@
 runpod
-diffusers[torch]
-transformers
-accelerate
-torch
-torchvision
-torchaudio
+diffusers>=0.30.0
+transformers>=4.43.3
+accelerate>=0.33.0
+sentencepiece
+protobuf
