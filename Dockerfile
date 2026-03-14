@@ -17,4 +17,4 @@ RUN pip install --no-cache-dir -r requirements.txt
 COPY handler.py .
 
 # Start the worker
-CMD ["python", "handler.py"]
+CMD ["python", "-u", "handler.py"]
