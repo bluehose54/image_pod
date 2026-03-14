@@ -1,5 +1,5 @@
 # 1. Use the official, completely pristine PyTorch image directly from the source
-FROM pytorch/pytorch:2.4.0-cuda12.1-cudnn9-runtime
+FROM pytorch/pytorch:2.4.1-cuda12.1-cudnn9-runtime
 
 WORKDIR /app
 
