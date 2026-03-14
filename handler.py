@@ -1,33 +1,43 @@
 import runpod
 from runpod.serverless.utils.rp_cleanup import clean
-from diffusers import DiffusionPipeline, DPMSolverMultistepScheduler
+from diffusers import FluxPipeline
 import torch
 import base64
 from io import BytesIO
 import random
 import traceback
+import os
 
-# --- 1. PERFORMANCE UPGRADE ---
-# Enable TensorFloat-32 (TF32) for 20-30% faster generation on Ampere+ GPUs (RTX 30xx/40xx/A-series)
+# --- 1. NETWORK VOLUME & AUTH SETUP ---
+VOLUME_PATH = "/runpod-volume/huggingface-cache"
+os.makedirs(VOLUME_PATH, exist_ok=True)
+
+# FLUX is a gated model. This pulls the token from your RunPod Environment Variables.
+HF_TOKEN = os.environ.get("HF_TOKEN")
+
+# Performance Upgrade for modern GPUs
 torch.backends.cuda.matmul.allow_tf32 = True
 
-print("Loading SDXL model into VRAM...")
-pipe = DiffusionPipeline.from_pretrained(
-    "stabilityai/stable-diffusion-xl-base-1.0",
-    torch_dtype=torch.float16,
-    use_safetensors=True,
-    variant="fp16"
-)
+print("Checking Network Volume for FLUX.1 [dev] model. This may take 5-10 minutes on the first run...")
 
-# --- 2. SCHEDULER UPGRADE ---
-# Swap to DPM++ 2M Karras for maximum photorealism and crisp micro-details
-pipe.scheduler = DPMSolverMultistepScheduler.from_config(
-    pipe.scheduler.config, 
-    use_karras_sigmas=True
-)
-
-pipe.to("cuda")
-print("Model loaded successfully!")
+try:
+    # --- 2. LOAD FLUX PIPELINE ---
+    # Notice we are using FluxPipeline and bfloat16 (which FLUX requires)
+    pipe = FluxPipeline.from_pretrained(
+        "black-forest-labs/FLUX.1-dev",
+        torch_dtype=torch.bfloat16,
+        cache_dir=VOLUME_PATH,
+        token=HF_TOKEN
+    )
+    
+    # CRITICAL: This prevents 24GB GPUs from crashing by offloading idle parts of the 23GB model to system RAM
+    pipe.enable_model_cpu_offload()
+    print("FLUX loaded successfully!")
+    
+except Exception as e:
+    print(f"❌ Failed to load FLUX: {e}")
+    print("Did you forget to add your HF_TOKEN to the RunPod Endpoint Environment Variables?")
+    raise e
 
 def handler(job):
     try:
@@ -35,23 +45,26 @@ def handler(job):
         
         # --- INPUT EXTRACTION ---
         prompt = job_input.get('prompt', 'A sweeping, hyper-realistic aerial photograph of ancient Jerusalem.')
-        default_negative = "cartoon, painting, illustration, worst quality, low quality, blurry, grainy, deformed, distorted, unnatural lighting, text, watermark"
-        negative_prompt = job_input.get('negative_prompt', default_negative)
         
         width = int(job_input.get('width', 1344))
         height = int(job_input.get('height', 768))
-        steps = int(job_input.get('steps', 40))
-        cfg_scale = float(job_input.get('guidance_scale', 7.5))
         
-        print(f"Generating image ({width}x{height}) for prompt: {prompt}")
+        # FLUX requires fewer steps for mastery. 28-30 is the sweet spot.
+        steps = int(job_input.get('steps', 28))
+        
+        # FLUX guidance scale is much lower than SDXL. 3.5 is standard.
+        cfg_scale = float(job_input.get('guidance_scale', 3.5))
+        
+        print(f"Generating FLUX image ({width}x{height}) for prompt: {prompt}")
         
         seed = job_input.get('seed', random.randint(0, 1000000))
-        generator = torch.Generator(device="cuda").manual_seed(seed)
+        # CPU generator is safer when using cpu_offload
+        generator = torch.Generator(device="cpu").manual_seed(seed) 
         
         # --- GENERATION ---
+        # Note: No negative_prompt! FLUX doesn't need it.
         image = pipe(
             prompt=prompt,
-            negative_prompt=negative_prompt,
             width=width,
             height=height,
             num_inference_steps=steps,
@@ -71,20 +84,16 @@ def handler(job):
             "image_base64": img_str
         }
 
-    # --- 3. ERROR HANDLING UPGRADE ---
     except Exception as e:
-        # If the code fails, safely catch the error and return it to the client as JSON
         error_msg = str(e)
         print(f"❌ Error during generation: {error_msg}")
-        traceback.print_exc() # Prints the exact line of the failure to your RunPod logs
-        
+        traceback.print_exc() 
         return {
             "status": "failed",
             "error": error_msg
         }
         
     finally:
-        # Always clean up the temporary VRAM/RAM buffers to prevent memory leaks
         clean()
 
 # Start the Serverless worker
